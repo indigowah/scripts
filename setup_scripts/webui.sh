@@ -81,12 +81,4 @@ open-webui serve &
 EOF
 chmod +x "$WEBUI_DIR/start_openwebui.sh"
 
-# Create the startup script for Ollama
-cat >"$WEBUI_DIR/start_ollama.sh" <<'EOF'
-#!/bin/bash
-# Run Ollama as a background task
-ollama serve &
-EOF
-chmod +x "$WEBUI_DIR/start_ollama.sh"
-
-echo "Setup complete. Use the scripts in $WEBUI_DIR to start OpenWebUI and Ollama."
+echo "Setup complete. Use the scripts in $WEBUI_DIR to start OpenWebUI"
