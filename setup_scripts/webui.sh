@@ -3,7 +3,7 @@
 # Install Homebrew if not installed
 if ! command -v brew &>/dev/null; then
     echo "Homebrew not found. Installing Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    /bin/bash -c ./brew.sh
 fi
 
 # Add Homebrew to PATH if not already in PATH
