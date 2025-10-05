@@ -21,6 +21,7 @@ class VoiceChanger:
         self.audio_queue = queue.Queue()
         self.text_queue = queue.Queue()
         self.running = False
+        self.stop_event = threading.Event()
         self.silence_threshold = 0.02
         self.silence_count = 0
         self.silence_frames = 30  # frames of silence to determine end of sentence
@@ -183,20 +184,23 @@ class VoiceChanger:
         
         accumulated_audio = []
 
-        while self.running:
-            audio_chunk = self.audio_queue.get()
-            if audio_chunk is None:  # End of sentence
-                if accumulated_audio:
-                    audio_data = np.concatenate(accumulated_audio)
-                    result = model.transcribe(audio_data)
-                    transcribed_text = result['text'].strip()
-                    if transcribed_text:  # Only process non-empty text
-                        timestamp = time.strftime("%H:%M:%S")
-                        print(f"\n[{timestamp}] Heard: {transcribed_text}")
-                        self.text_queue.put(transcribed_text)
-                    accumulated_audio = []
-            else:
-                accumulated_audio.append(audio_chunk)
+        while self.running and not self.stop_event.is_set():
+            try:
+                audio_chunk = self.audio_queue.get(timeout=0.5)
+                if audio_chunk is None:  # End of sentence
+                    if accumulated_audio:
+                        audio_data = np.concatenate(accumulated_audio)
+                        result = model.transcribe(audio_data)
+                        transcribed_text = result['text'].strip()
+                        if transcribed_text:  # Only process non-empty text
+                            timestamp = time.strftime("%H:%M:%S")
+                            print(f"\n[{timestamp}] Heard: {transcribed_text}")
+                            self.text_queue.put(transcribed_text)
+                        accumulated_audio = []
+                else:
+                    accumulated_audio.append(audio_chunk)
+            except queue.Empty:
+                continue  # Timeout occurred, check stop_event
 
     def text_to_speech(self):
         """Thread function for converting text to speech using pyttsx3."""
@@ -209,17 +213,42 @@ class VoiceChanger:
         if voice_idx < len(voices):
             self.engine.setProperty('voice', voices[voice_idx].id)
 
-        while self.running:
-            text = self.text_queue.get()
-            if text:
-                timestamp = time.strftime("%H:%M:%S")
-                print(f"[{timestamp}] Speaking: {text}")
-                self.engine.say(text)
-                self.engine.runAndWait()
+        while self.running and not self.stop_event.is_set():
+            try:
+                text = self.text_queue.get(timeout=0.5)
+                if text:
+                    timestamp = time.strftime("%H:%M:%S")
+                    print(f"[{timestamp}] Speaking: {text}")
+                    self.engine.say(text)
+                    self.engine.runAndWait()
+            except queue.Empty:
+                continue  # Timeout occurred, check stop_event
+
+    def handle_stop(self):
+        """Handle the stop event triggered by the end key."""
+        print("\nStop requested...")
+        self.stop()
+        
+    def stop(self):
+        """Stop all threads and cleanup."""
+        self.running = False
+        self.stop_event.set()
+        # Clear queues to unblock threads
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        while not self.text_queue.empty():
+            try:
+                self.text_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def run(self):
         """Main function to run the voice changer."""
         self.running = True
+        self.stop_event.clear()  # Reset stop event
 
         # Set up audio stream
         stream = self.pa.open(
@@ -242,12 +271,18 @@ class VoiceChanger:
 
         print("\nVoice changer is running! Press 'end' to quit.")
         stream.start_stream()
-
-        while self.running:
-            if keyboard.is_pressed('end'):
-                self.running = False
-                break
-            time.sleep(0.1)
+        
+        # Set up keyboard event handler
+        keyboard.on_press_key('end', lambda _: self.handle_stop())
+        
+        try:
+            while self.running and not self.stop_event.is_set():
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            print("\nStopping voice changer...")
+            self.stop()
 
         # Cleanup
         stream.stop_stream()
