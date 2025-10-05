@@ -25,15 +25,50 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class VoiceOver:
+    AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large"]
+
     def __init__(self):
         logger.info("Initializing VoiceOver")
         self.audio = pyaudio.PyAudio()
         self.recording = False
         self.audio_queue = queue.Queue()
-        logger.info("Loading Whisper model (tiny)")
-        self.whisper_model = whisper.load_model("tiny")
         self.system = platform.system()
         logger.info(f"Running on {self.system}")
+        
+        # Select Whisper model
+        self.whisper_model = self.select_whisper_model()
+        
+        # Initialize TTS engine
+        self.initialize_tts()
+
+    def initialize_tts(self):
+        """Initialize the appropriate TTS engine based on the platform."""
+        if self.system == "Darwin":  # macOS
+            self.tts_command = "say"
+            logger.info("Initialized macOS 'say' command for TTS")
+        else:  # Windows/Linux
+            self.tts_command = "espeak"
+            logger.info("Initialized espeak for TTS")
+
+    def select_whisper_model(self) -> whisper.Whisper:
+        """Let user select the Whisper model to use."""
+        print("\nAvailable Whisper Models:")
+        print("-" * 50)
+        for i, model in enumerate(self.AVAILABLE_MODELS):
+            print(f"{i + 1}. {model}")
+        print("-" * 50)
+        
+        while True:
+            try:
+                choice = int(input("\nEnter the number of the model you want to use (1-5): "))
+                if 1 <= choice <= len(self.AVAILABLE_MODELS):
+                    model_name = self.AVAILABLE_MODELS[choice - 1]
+                    logger.info(f"Loading Whisper model ({model_name})")
+                    return whisper.load_model(model_name)
+                else:
+                    print("Invalid choice. Please enter a number between 1 and 5.")
+            except ValueError:
+                print("Please enter a valid number.")
         
     def list_audio_devices(self):
         """List all available audio input and output devices."""
@@ -134,9 +169,20 @@ class VoiceOver:
                             language='en',
                             fp16=False
                         )
-                        if result["text"].strip():
-                            print(f"Transcription: {result['text'].strip()}")
-                            logger.info(f"Transcribed: {result['text'].strip()}")
+                        transcribed_text = result["text"].strip()
+                        if transcribed_text:
+                            print(f"Transcription: {transcribed_text}")
+                            logger.info(f"Transcribed: {transcribed_text}")
+                            
+                            # Send to TTS
+                            try:
+                                if self.system == "Darwin":
+                                    subprocess.run([self.tts_command, transcribed_text])
+                                else:
+                                    subprocess.run([self.tts_command, transcribed_text])
+                                logger.info(f"Sent to TTS: {transcribed_text}")
+                            except Exception as e:
+                                logger.error(f"Error with TTS: {e}")
                     except Exception as e:
                         logger.error(f"Error transcribing audio: {e}")
                 
