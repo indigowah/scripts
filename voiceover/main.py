@@ -171,7 +171,16 @@ class VoiceChanger:
 
     def transcribe_audio(self):
         """Thread function for transcribing audio using Whisper."""
-        model = whisper.load_model(self.config['whisper_model'])
+        # Check if CUDA is available
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = whisper.load_model(self.config['whisper_model']).to(device)
+        
+        # If using CPU, ensure we're using FP32
+        if device == "cpu":
+            model.eval()
+            model = model.float()
+        
         accumulated_audio = []
 
         while self.running:
