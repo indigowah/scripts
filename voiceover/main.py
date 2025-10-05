@@ -8,6 +8,7 @@ import time
 import queue
 import numpy as np
 import logging
+import sys
 from datetime import datetime
 from typing import Optional
 from pathlib import Path
@@ -41,14 +42,55 @@ class VoiceOver:
         # Initialize TTS engine
         self.initialize_tts()
 
+    def verify_tts_available(self, command):
+        """Verify if TTS command is available."""
+        try:
+            if self.system == "Windows":
+                # Check common installation paths for espeak on Windows
+                espeak_paths = [
+                    "C:\\Program Files\\eSpeak\\command_line\\espeak.exe",
+                    "C:\\Program Files (x86)\\eSpeak\\command_line\\espeak.exe",
+                    "espeak"  # Try system PATH
+                ]
+                for path in espeak_paths:
+                    try:
+                        subprocess.run([path, "--version"], 
+                                    stdout=subprocess.PIPE, 
+                                    stderr=subprocess.PIPE)
+                        return path
+                    except FileNotFoundError:
+                        continue
+                raise FileNotFoundError("espeak not found in common locations")
+            else:
+                # For macOS and Linux, check if command exists
+                subprocess.run([command, "--version"], 
+                            stdout=subprocess.PIPE, 
+                            stderr=subprocess.PIPE)
+                return command
+        except Exception as e:
+            raise FileNotFoundError(f"TTS command '{command}' not available: {e}")
+
     def initialize_tts(self):
         """Initialize the appropriate TTS engine based on the platform."""
         if self.system == "Darwin":  # macOS
-            self.tts_command = "say"
-            logger.info("Initialized macOS 'say' command for TTS")
+            try:
+                self.tts_command = self.verify_tts_available("say")
+                logger.info("Initialized macOS 'say' command for TTS")
+            except FileNotFoundError:
+                logger.error("macOS 'say' command not available")
+                raise
         else:  # Windows/Linux
-            self.tts_command = "espeak"
-            logger.info("Initialized espeak for TTS")
+            try:
+                self.tts_command = self.verify_tts_available("espeak")
+                logger.info("Initialized espeak for TTS")
+            except FileNotFoundError:
+                logger.error("espeak not found. Please install espeak:")
+                if self.system == "Windows":
+                    logger.error("Download espeak from: http://espeak.sourceforge.net/")
+                    logger.error("Or install with: winget install espeak")
+                else:
+                    logger.error("Install with: sudo apt-get install espeak")
+                raise
 
     def select_whisper_model(self) -> whisper.Whisper:
         """Let user select the Whisper model to use."""
@@ -177,10 +219,21 @@ class VoiceOver:
                             # Send to TTS
                             try:
                                 if self.system == "Darwin":
-                                    subprocess.run([self.tts_command, transcribed_text])
+                                    subprocess.run([self.tts_command, transcribed_text], check=True)
                                 else:
-                                    subprocess.run([self.tts_command, transcribed_text])
+                                    # For espeak, add some parameters for better output
+                                    subprocess.run([
+                                        self.tts_command,
+                                        "-s", "175",  # Speed
+                                        "-v", "en",   # Voice
+                                        "-a", "150",  # Amplitude (volume)
+                                        transcribed_text
+                                    ], check=True)
                                 logger.info(f"Sent to TTS: {transcribed_text}")
+                                # Increment transcription count in thread manager
+                                thread_manager.increment_transcription_count()
+                            except subprocess.CalledProcessError as e:
+                                logger.error(f"TTS command failed: {e}")
                             except Exception as e:
                                 logger.error(f"Error with TTS: {e}")
                     except Exception as e:
@@ -203,9 +256,12 @@ class AudioThreadManager:
         self.input_device = input_device
         self.record_thread = None
         self.process_thread = None
+        self.running = True
+        self.session_start_time = time.time()
+        self.transcription_count = 0
 
     def start_threads(self):
-        if not self.voiceover.recording:
+        if not self.voiceover.recording and self.running:
             logger.info("'V' key pressed - starting recording")
             self.voiceover.recording = True
             
@@ -229,11 +285,56 @@ class AudioThreadManager:
                 self.record_thread.join()
                 self.process_thread.join()
 
+    def increment_transcription_count(self):
+        self.transcription_count += 1
+
+    def save_session_summary(self):
+        """Save session summary to log file."""
+        session_duration = time.time() - self.session_start_time
+        hours, remainder = divmod(int(session_duration), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        summary = f"""
+{'-' * 50}
+Session Summary
+{'-' * 50}
+Duration: {hours:02d}:{minutes:02d}:{seconds:02d}
+Total Transcriptions: {self.transcription_count}
+Whisper Model Used: {self.voiceover.whisper_model.model_type}
+System Platform: {self.voiceover.system}
+TTS Engine: {self.voiceover.tts_command}
+{'-' * 50}
+"""
+        logger.info(summary)
+        
+        # Save summary to a separate file
+        summary_file = Path(__file__).parent / f'session_summary_{time.strftime("%Y%m%d_%H%M%S")}.txt'
+        try:
+            with open(summary_file, 'w') as f:
+                f.write(summary)
+            logger.info(f"Session summary saved to {summary_file}")
+        except Exception as e:
+            logger.error(f"Error saving session summary: {e}")
+
+    def shutdown(self):
+        """Gracefully shutdown the audio manager."""
+        logger.info("Initiating shutdown...")
+        self.running = False
+        self.voiceover.recording = False
+        self.save_session_summary()
+
 if __name__ == "__main__":
     logger.info("Starting VoiceOver application")
     
     try:
         voiceover = VoiceOver()
+    except FileNotFoundError as e:
+        logger.error("Failed to initialize TTS engine")
+        print("\nError: Text-to-Speech engine not found!")
+        print("Please install the required TTS engine and try again.")
+        sys.exit(1)
+        
+    try:
         input_device, output_device = voiceover.select_devices()
         
         if input_device is not None and output_device is not None:
@@ -246,6 +347,19 @@ if __name__ == "__main__":
             # Set up key handlers
             keyboard.on_press_key('v', lambda _: thread_manager.start_threads())
             keyboard.on_release_key('v', lambda _: thread_manager.stop_threads())
+            
+            def on_end_press(_):
+                print("\nEnding session and saving logs...")
+                thread_manager.shutdown()
+                return False  # Stop listener
+            
+            # Register end key handler
+            keyboard.on_press_key('end', on_end_press)
+            
+            print("\nControls:")
+            print("- Hold 'V' to record and transcribe")
+            print("- Press 'End' to save and exit")
+            print("- Press 'Esc' for emergency exit (logs may not save properly)\n")
 
             # Keep the main thread alive
             keyboard.wait('esc')
