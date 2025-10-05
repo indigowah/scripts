@@ -151,6 +151,38 @@ class VoiceOver:
             logger.info("Terminating PyAudio")
             self.audio.terminate()
 
+class AudioThreadManager:
+    def __init__(self, voiceover, input_device):
+        self.voiceover = voiceover
+        self.input_device = input_device
+        self.record_thread = None
+        self.process_thread = None
+
+    def start_threads(self):
+        if not self.voiceover.recording:
+            logger.info("'V' key pressed - starting recording")
+            self.voiceover.recording = True
+            
+            self.record_thread = threading.Thread(
+                target=self.voiceover.start_recording, 
+                args=(self.input_device,)
+            )
+            self.process_thread = threading.Thread(
+                target=self.voiceover.process_audio
+            )
+            
+            self.record_thread.start()
+            self.process_thread.start()
+
+    def stop_threads(self):
+        if self.voiceover.recording:
+            logger.info("'V' key released - stopping recording")
+            self.voiceover.recording = False
+            
+            if self.record_thread and self.process_thread:
+                self.record_thread.join()
+                self.process_thread.join()
+
 if __name__ == "__main__":
     logger.info("Starting VoiceOver application")
     
@@ -160,38 +192,14 @@ if __name__ == "__main__":
         
         if input_device is not None and output_device is not None:
             logger.info(f"Successfully initialized with input device {input_device} and output device {output_device}")
-            print("\nPress and hold 'V' to start recording. Release to stop. Press Ctrl+C to exit.")
+            print("\nPress and hold 'V' to start recording. Release to stop. Press 'Esc' to exit.")
             
-            # Create threads for recording and processing
-            record_thread = None
-            process_thread = None
+            # Create thread manager
+            thread_manager = AudioThreadManager(voiceover, input_device)
             
-            def on_press(event):
-                if event.name == 'v' and not voiceover.recording:
-                    logger.info("'V' key pressed - starting recording")
-                    voiceover.recording = True
-                    
-                    # Start recording thread
-                    nonlocal record_thread, process_thread
-                    record_thread = threading.Thread(target=voiceover.start_recording, args=(input_device,))
-                    process_thread = threading.Thread(target=voiceover.process_audio)
-                    
-                    record_thread.start()
-                    process_thread.start()
-
-            def on_release(event):
-                if event.name == 'v' and voiceover.recording:
-                    logger.info("'V' key released - stopping recording")
-                    voiceover.recording = False
-                    
-                    # Wait for threads to complete
-                    if record_thread and process_thread:
-                        record_thread.join()
-                        process_thread.join()
-
-            # Register key event handlers
-            keyboard.on_press(on_press)
-            keyboard.on_release(on_release)
+            # Set up key handlers
+            keyboard.on_press_key('v', lambda _: thread_manager.start_threads())
+            keyboard.on_release_key('v', lambda _: thread_manager.stop_threads())
 
             # Keep the main thread alive
             keyboard.wait('esc')
