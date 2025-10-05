@@ -194,10 +194,19 @@ class VoiceOver:
         """Process audio chunks and transcribe using Whisper."""
         audio_buffer = []
         silence_threshold = 0.01
-        min_audio_length = 0.2  # Reduced minimum audio length
-        max_audio_length = 0.5  # Maximum audio length to prevent delay
+        min_audio_length = 0.5  # Increased to capture more complete phrases
+        max_audio_length = 1.0  # Increased to allow for complete sentences
         samples_per_sec = 16000
         last_process_time = time.time()
+        silence_duration = 0.3  # Duration of silence to consider end of phrase
+        last_voice_time = time.time()
+        self.tts_queue = queue.Queue()
+        self.tts_busy = False
+        
+        # Start TTS worker thread
+        tts_worker = threading.Thread(target=self._tts_worker)
+        tts_worker.daemon = True
+        tts_worker.start()
         
         while self.recording or not self.audio_queue.empty():
             current_time = time.time()
@@ -209,11 +218,22 @@ class VoiceOver:
 
             buffer_duration = len(audio_buffer) / samples_per_sec
             
-            # Process audio if we have enough samples or max length reached
-            if (buffer_duration >= min_audio_length and 
-                (buffer_duration >= max_audio_length or 
-                 current_time - last_process_time >= max_audio_length)):
-                
+            # Check if we have voice in the current buffer
+            if audio_buffer:
+                current_amplitude = np.abs(np.array(audio_buffer)).mean()
+                if current_amplitude > silence_threshold:
+                    last_voice_time = current_time
+            
+            # Process audio if we have enough samples and either:
+            # 1. Max length reached, or
+            # 2. Silence detected for long enough
+            should_process = (
+                buffer_duration >= min_audio_length and
+                (buffer_duration >= max_audio_length or
+                 current_time - last_voice_time >= silence_duration)
+            )
+            
+            if should_process and audio_buffer:
                 audio_array = np.array(audio_buffer)
                 
                 # Only process if audio is not silence
@@ -224,22 +244,16 @@ class VoiceOver:
                             audio_array,
                             language='en',
                             fp16=False,
-                            without_timestamps=True,  # Faster processing
-                            condition_on_previous_text=False,  # Don't wait for context
-                            temperature=0.0  # Deterministic, faster inference
+                            without_timestamps=True,
+                            condition_on_previous_text=True,  # Enable for better sentence completion
+                            temperature=0.0
                         )
                         
                         transcribed_text = result["text"].strip()
                         if transcribed_text:
                             print(f"Transcription: {transcribed_text}")
                             logger.info(f"Transcribed: {transcribed_text}")
-                            
-                            # Use threading for TTS to prevent blocking
-                            tts_thread = threading.Thread(
-                                target=self._run_tts,
-                                args=(transcribed_text,)
-                            )
-                            tts_thread.start()
+                            self.tts_queue.put(transcribed_text)
                             
                     except Exception as e:
                         logger.error(f"Error transcribing audio: {e}")
@@ -251,25 +265,57 @@ class VoiceOver:
             # Small sleep to prevent CPU overload
             time.sleep(0.001)
 
+    def _tts_worker(self):
+        """Worker thread to process TTS queue."""
+        while self.recording or not self.tts_queue.empty():
+            try:
+                text = self.tts_queue.get(timeout=0.5)
+                self._run_tts(text)
+                self.tts_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error in TTS worker: {e}")
+                
     def _run_tts(self, text):
-        """Run TTS in a separate thread."""
+        """Run TTS with proper device routing."""
         try:
             if self.system == "Darwin":
-                subprocess.run([self.tts_command, text], check=True)
+                cmd = [self.tts_command, text]
             else:
-                subprocess.run([
+                cmd = [
                     self.tts_command,
                     "-s", "175",  # Speed
                     "-v", "en",   # Voice
                     "-a", "150",  # Amplitude
-                    text
-                ], check=True)
+                    "--stdout"    # Output to stdout instead of default audio
+                ]
+                if hasattr(self, 'output_device'):
+                    # Add text last for espeak
+                    cmd.extend([text])
+                
+            if self.system == "Windows":
+                # Use PowerShell to redirect audio to specific device
+                full_cmd = [
+                    "powershell.exe",
+                    "-Command",
+                    f"$audio = New-Object System.Media.SoundPlayer; " +
+                    f"$audio.PlayDevice = {self.output_device}; " +
+                    f"& {' '.join(cmd)}"
+                ]
+                cmd = full_cmd
+            
+            subprocess.run(cmd, check=True)
             logger.info(f"Sent to TTS: {text}")
             thread_manager.increment_transcription_count()
+            
         except subprocess.CalledProcessError as e:
             logger.error(f"TTS command failed: {e}")
         except Exception as e:
             logger.error(f"Error with TTS: {e}")
+            
+        # Add a small delay between TTS outputs to prevent overlap
+        time.sleep(0.1)
 
         logger.info("Stopped processing audio")
 
