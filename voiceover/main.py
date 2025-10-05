@@ -180,7 +180,11 @@ class VoiceChanger:
                 if accumulated_audio:
                     audio_data = np.concatenate(accumulated_audio)
                     result = model.transcribe(audio_data)
-                    self.text_queue.put(result['text'])
+                    transcribed_text = result['text'].strip()
+                    if transcribed_text:  # Only process non-empty text
+                        timestamp = time.strftime("%H:%M:%S")
+                        print(f"\n[{timestamp}] Heard: {transcribed_text}")
+                        self.text_queue.put(transcribed_text)
                     accumulated_audio = []
             else:
                 accumulated_audio.append(audio_chunk)
@@ -199,6 +203,8 @@ class VoiceChanger:
         while self.running:
             text = self.text_queue.get()
             if text:
+                timestamp = time.strftime("%H:%M:%S")
+                print(f"[{timestamp}] Speaking: {text}")
                 self.engine.say(text)
                 self.engine.runAndWait()
 
