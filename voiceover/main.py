@@ -157,7 +157,7 @@ class VoiceOver:
 
     def start_recording(self, input_device):
         """Start recording audio from the selected input device."""
-        CHUNK = 1024
+        CHUNK = 512  # Reduced chunk size for lower latency
         FORMAT = pyaudio.paFloat32
         CHANNELS = 1
         RATE = 16000  # Whisper expects 16kHz
@@ -168,79 +168,108 @@ class VoiceOver:
             rate=RATE,
             input=True,
             input_device_index=input_device,
-            frames_per_buffer=CHUNK
+            frames_per_buffer=CHUNK,
+            stream_callback=self._audio_callback  # Use callback for non-blocking
         )
         
         logger.info(f"Started recording from device {input_device}")
         self.recording = True
+        self.stream.start_stream()
         
         while self.recording:
-            try:
-                data = self.stream.read(CHUNK, exception_on_overflow=False)
-                audio_data = np.frombuffer(data, dtype=np.float32)
-                self.audio_queue.put(audio_data)
-            except Exception as e:
-                logger.error(f"Error recording audio: {e}")
-                break
-
+            time.sleep(0.001)  # Tiny sleep to prevent CPU overload
+            
         self.stream.stop_stream()
         self.stream.close()
         logger.info("Stopped recording")
+
+    def _audio_callback(self, in_data, frame_count, time_info, status):
+        """Callback for audio processing."""
+        if self.recording:
+            audio_data = np.frombuffer(in_data, dtype=np.float32)
+            self.audio_queue.put(audio_data)
+        return (in_data, pyaudio.paContinue)
 
     def process_audio(self):
         """Process audio chunks and transcribe using Whisper."""
         audio_buffer = []
         silence_threshold = 0.01
-        min_audio_length = 0.5  # minimum seconds of audio to process
+        min_audio_length = 0.2  # Reduced minimum audio length
+        max_audio_length = 0.5  # Maximum audio length to prevent delay
         samples_per_sec = 16000
+        last_process_time = time.time()
         
         while self.recording or not self.audio_queue.empty():
+            current_time = time.time()
+            
+            # Process any available chunks
             while not self.audio_queue.empty():
-                chunk = self.audio_queue.get()
+                chunk = self.audio_queue.get_nowait()
                 audio_buffer.extend(chunk)
 
-            # Process audio if we have enough samples
-            if len(audio_buffer) > samples_per_sec * min_audio_length:
+            buffer_duration = len(audio_buffer) / samples_per_sec
+            
+            # Process audio if we have enough samples or max length reached
+            if (buffer_duration >= min_audio_length and 
+                (buffer_duration >= max_audio_length or 
+                 current_time - last_process_time >= max_audio_length)):
+                
                 audio_array = np.array(audio_buffer)
                 
                 # Only process if audio is not silence
                 if np.abs(audio_array).mean() > silence_threshold:
                     try:
+                        # Optimize Whisper transcription for speed
                         result = self.whisper_model.transcribe(
-                            audio_array, 
+                            audio_array,
                             language='en',
-                            fp16=False
+                            fp16=False,
+                            without_timestamps=True,  # Faster processing
+                            condition_on_previous_text=False,  # Don't wait for context
+                            temperature=0.0  # Deterministic, faster inference
                         )
+                        
                         transcribed_text = result["text"].strip()
                         if transcribed_text:
                             print(f"Transcription: {transcribed_text}")
                             logger.info(f"Transcribed: {transcribed_text}")
                             
-                            # Send to TTS
-                            try:
-                                if self.system == "Darwin":
-                                    subprocess.run([self.tts_command, transcribed_text], check=True)
-                                else:
-                                    # For espeak, add some parameters for better output
-                                    subprocess.run([
-                                        self.tts_command,
-                                        "-s", "175",  # Speed
-                                        "-v", "en",   # Voice
-                                        "-a", "150",  # Amplitude (volume)
-                                        transcribed_text
-                                    ], check=True)
-                                logger.info(f"Sent to TTS: {transcribed_text}")
-                                # Increment transcription count in thread manager
-                                thread_manager.increment_transcription_count()
-                            except subprocess.CalledProcessError as e:
-                                logger.error(f"TTS command failed: {e}")
-                            except Exception as e:
-                                logger.error(f"Error with TTS: {e}")
+                            # Use threading for TTS to prevent blocking
+                            tts_thread = threading.Thread(
+                                target=self._run_tts,
+                                args=(transcribed_text,)
+                            )
+                            tts_thread.start()
+                            
                     except Exception as e:
                         logger.error(f"Error transcribing audio: {e}")
                 
-                # Clear the buffer
+                # Clear the buffer and update time
                 audio_buffer = []
+                last_process_time = current_time
+            
+            # Small sleep to prevent CPU overload
+            time.sleep(0.001)
+
+    def _run_tts(self, text):
+        """Run TTS in a separate thread."""
+        try:
+            if self.system == "Darwin":
+                subprocess.run([self.tts_command, text], check=True)
+            else:
+                subprocess.run([
+                    self.tts_command,
+                    "-s", "175",  # Speed
+                    "-v", "en",   # Voice
+                    "-a", "150",  # Amplitude
+                    text
+                ], check=True)
+            logger.info(f"Sent to TTS: {text}")
+            thread_manager.increment_transcription_count()
+        except subprocess.CalledProcessError as e:
+            logger.error(f"TTS command failed: {e}")
+        except Exception as e:
+            logger.error(f"Error with TTS: {e}")
 
         logger.info("Stopped processing audio")
 
@@ -261,24 +290,25 @@ class AudioThreadManager:
         self.transcription_count = 0
 
     def start_threads(self):
-        if not self.voiceover.recording and self.running:
-            logger.info("'V' key pressed - starting recording")
-            self.voiceover.recording = True
-            
-            self.record_thread = threading.Thread(
-                target=self.voiceover.start_recording, 
-                args=(self.input_device,)
-            )
-            self.process_thread = threading.Thread(
-                target=self.voiceover.process_audio
-            )
-            
-            self.record_thread.start()
-            self.process_thread.start()
+        """Start recording and processing threads."""
+        logger.info("Starting continuous recording and processing")
+        self.voiceover.recording = True
+        
+        self.record_thread = threading.Thread(
+            target=self.voiceover.start_recording, 
+            args=(self.input_device,)
+        )
+        self.process_thread = threading.Thread(
+            target=self.voiceover.process_audio
+        )
+        
+        self.record_thread.start()
+        self.process_thread.start()
 
     def stop_threads(self):
+        """Stop recording and processing threads."""
         if self.voiceover.recording:
-            logger.info("'V' key released - stopping recording")
+            logger.info("Stopping recording and processing")
             self.voiceover.recording = False
             
             if self.record_thread and self.process_thread:
@@ -344,9 +374,8 @@ if __name__ == "__main__":
             # Create thread manager
             thread_manager = AudioThreadManager(voiceover, input_device)
             
-            # Set up key handlers
-            keyboard.on_press_key('v', lambda _: thread_manager.start_threads())
-            keyboard.on_release_key('v', lambda _: thread_manager.stop_threads())
+            # Start recording immediately
+            thread_manager.start_threads()
             
             def on_end_press(_):
                 print("\nEnding session and saving logs...")
@@ -356,8 +385,8 @@ if __name__ == "__main__":
             # Register end key handler
             keyboard.on_press_key('end', on_end_press)
             
+            print("\nRecording started...")
             print("\nControls:")
-            print("- Hold 'V' to record and transcribe")
             print("- Press 'End' to save and exit")
             print("- Press 'Esc' for emergency exit (logs may not save properly)\n")
 
