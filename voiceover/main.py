@@ -9,7 +9,7 @@ import threading
 import queue
 import time
 import sounddevice as sd
-import espeak
+import pyttsx3
 from scipy.io import wavfile
 import os
 from typing import Dict, Any
@@ -24,6 +24,7 @@ class VoiceChanger:
         self.silence_threshold = 0.02
         self.silence_count = 0
         self.silence_frames = 30  # frames of silence to determine end of sentence
+        self.engine = pyttsx3.init()
         self.load_or_create_config()
 
     def load_or_create_config(self) -> None:
@@ -55,17 +56,19 @@ class VoiceChanger:
             print(f"    Output channels: {dev_info['maxOutputChannels']}")
             print("-" * 50)
 
-    def test_espeak_settings(self, settings: Dict[str, Any]) -> None:
-        """Test espeak settings with a sample text."""
-        espeak.init()
-        for k, v in settings.items():
-            if hasattr(espeak, f"set_{k}"):
-                getattr(espeak, f"set_{k}")(v)
+    def test_tts_settings(self, settings: Dict[str, Any]) -> None:
+        """Test text-to-speech settings with a sample text."""
+        self.engine.setProperty('rate', settings['rate'])
+        self.engine.setProperty('volume', settings['volume'] / 100.0)  # Convert to 0-1 range
         
-        test_text = "This is a test of the current espeak settings."
+        voices = self.engine.getProperty('voices')
+        if settings.get('voice_idx', 0) < len(voices):
+            self.engine.setProperty('voice', voices[settings['voice_idx']].id)
+        
+        test_text = "This is a test of the current voice settings."
         print("\nPlaying test voice...")
-        espeak.synth(test_text)
-        time.sleep(2)  # Wait for speech to complete
+        self.engine.say(test_text)
+        self.engine.runAndWait()
 
     def configure_settings(self) -> Dict[str, Any]:
         """Configure all settings with user input."""
@@ -110,23 +113,40 @@ class VoiceChanger:
             except ValueError:
                 print("Please enter a valid number!")
 
-        # eSpeak settings
-        print("\nConfigure eSpeak settings:")
-        config['espeak'] = {
+        # TTS settings
+        print("\nConfigure Text-to-Speech settings:")
+        config['tts'] = {
             'rate': int(input("Speech rate (words per minute, default 175): ") or 175),
-            'pitch': int(input("Pitch (0-100, default 50): ") or 50),
             'volume': int(input("Volume (0-100, default 100): ") or 100)
         }
 
-        # Test eSpeak settings
+        # Voice selection
+        voices = self.engine.getProperty('voices')
+        print("\nAvailable voices:")
+        for idx, voice in enumerate(voices):
+            print(f"{idx}: {voice.name}")
+        
         while True:
-            self.test_espeak_settings(config['espeak'])
+            try:
+                voice_idx = int(input("\nSelect voice index: "))
+                if 0 <= voice_idx < len(voices):
+                    config['tts']['voice_idx'] = voice_idx
+                    break
+                print("Invalid voice index!")
+            except ValueError:
+                print("Please enter a valid number!")
+
+        # Test TTS settings
+        while True:
+            self.test_tts_settings(config['tts'])
             if input("\nAre these settings okay? (y/n): ").lower() == 'y':
                 break
             print("\nLet's adjust the settings:")
-            config['espeak']['rate'] = int(input("Speech rate: ") or config['espeak']['rate'])
-            config['espeak']['pitch'] = int(input("Pitch: ") or config['espeak']['pitch'])
-            config['espeak']['volume'] = int(input("Volume: ") or config['espeak']['volume'])
+            config['tts']['rate'] = int(input("Speech rate: ") or config['tts']['rate'])
+            config['tts']['volume'] = int(input("Volume: ") or config['tts']['volume'])
+            voice_idx = int(input("Voice index: ") or config['tts']['voice_idx'])
+            if 0 <= voice_idx < len(voices):
+                config['tts']['voice_idx'] = voice_idx
 
         return config
 
@@ -166,16 +186,21 @@ class VoiceChanger:
                 accumulated_audio.append(audio_chunk)
 
     def text_to_speech(self):
-        """Thread function for converting text to speech using eSpeak."""
-        espeak.init()
-        for k, v in self.config['espeak'].items():
-            if hasattr(espeak, f"set_{k}"):
-                getattr(espeak, f"set_{k}")(v)
+        """Thread function for converting text to speech using pyttsx3."""
+        # Configure TTS settings
+        self.engine.setProperty('rate', self.config['tts']['rate'])
+        self.engine.setProperty('volume', self.config['tts']['volume'] / 100.0)
+        
+        voices = self.engine.getProperty('voices')
+        voice_idx = self.config['tts'].get('voice_idx', 0)
+        if voice_idx < len(voices):
+            self.engine.setProperty('voice', voices[voice_idx].id)
 
         while self.running:
             text = self.text_queue.get()
             if text:
-                espeak.synth(text)
+                self.engine.say(text)
+                self.engine.runAndWait()
 
     def run(self):
         """Main function to run the voice changer."""

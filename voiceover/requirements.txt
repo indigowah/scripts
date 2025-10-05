@@ -2,7 +2,7 @@ pyaudio
 keyboard
 openai-whisper
 numpy
-python-espeak
+pyttsx3
 sounddevice
 scipy
 pyyaml
