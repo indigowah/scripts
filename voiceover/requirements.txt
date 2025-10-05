@@ -2,3 +2,4 @@ pyaudio
 keyboard
 openai-whisper
 numpy
+pywin32; platform_system == "Windows"

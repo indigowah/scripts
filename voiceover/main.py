@@ -83,6 +83,17 @@ class VoiceOver:
             try:
                 self.tts_command = self.verify_tts_available("espeak")
                 logger.info("Initialized espeak for TTS")
+                
+                if self.system == "Windows":
+                    # Set up Windows audio routing
+                    try:
+                        import win32com.client
+                        self.audio_endpoint = win32com.client.Dispatch("SAPI.SpVoice")
+                        logger.info("Initialized Windows audio routing")
+                    except Exception as e:
+                        logger.warning(f"Could not initialize Windows audio routing: {e}")
+                        logger.warning("Will use default audio output")
+                        
             except FileNotFoundError:
                 logger.error("espeak not found. Please install espeak:")
                 if self.system == "Windows":
@@ -149,6 +160,8 @@ class VoiceOver:
             if output_info['maxOutputChannels'] == 0:
                 raise ValueError("Selected output device has no output channels")
                 
+            # Store the output device ID
+            self.output_device = output_id
             return input_id, output_id
             
         except (ValueError, OSError) as e:
@@ -280,42 +293,46 @@ class VoiceOver:
     def _run_tts(self, text):
         """Run TTS with proper device routing."""
         try:
+            if not hasattr(self, 'output_device'):
+                raise AttributeError("Output device not set")
+
             if self.system == "Darwin":
+                # macOS command
                 cmd = [self.tts_command, text]
-            else:
+                subprocess.run(cmd, check=True)
+            elif self.system == "Windows":
+                # Windows command using default audio endpoint
                 cmd = [
                     self.tts_command,
-                    "-s", "175",  # Speed
-                    "-v", "en",   # Voice
-                    "-a", "150",  # Amplitude
-                    "--stdout"    # Output to stdout instead of default audio
+                    "-s", "175",    # Speed
+                    "-v", "en",     # Voice
+                    "-a", "150",    # Amplitude
+                    text
                 ]
-                if hasattr(self, 'output_device'):
-                    # Add text last for espeak
-                    cmd.extend([text])
-                
-            if self.system == "Windows":
-                # Use PowerShell to redirect audio to specific device
-                full_cmd = [
-                    "powershell.exe",
-                    "-Command",
-                    f"$audio = New-Object System.Media.SoundPlayer; " +
-                    f"$audio.PlayDevice = {self.output_device}; " +
-                    f"& {' '.join(cmd)}"
+                subprocess.run(cmd, check=True)
+            else:
+                # Linux command
+                cmd = [
+                    self.tts_command,
+                    "-s", "175",
+                    "-v", "en",
+                    "-a", "150",
+                    text
                 ]
-                cmd = full_cmd
-            
-            subprocess.run(cmd, check=True)
+                subprocess.run(cmd, check=True)
+
             logger.info(f"Sent to TTS: {text}")
             thread_manager.increment_transcription_count()
             
+        except AttributeError as e:
+            logger.error(f"Device configuration error: {e}")
         except subprocess.CalledProcessError as e:
             logger.error(f"TTS command failed: {e}")
         except Exception as e:
             logger.error(f"Error with TTS: {e}")
             
         # Add a small delay between TTS outputs to prevent overlap
-        time.sleep(0.1)
+        time.sleep(0.2)
 
         logger.info("Stopped processing audio")
 
